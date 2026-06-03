@@ -1,3 +1,13 @@
+from enum import Enum, auto
+
+EXERCISES = ["SQUAT"]
+
+class AppState(Enum):
+    MENU = auto()
+    WORKOUT = auto()
+    RESIGN_DIALOG = auto()
+    SUMMARY = auto()
+
 CAMERA_INDEX = 0
 FRAME_WIDTH  = 1280
 FRAME_HEIGHT = 720

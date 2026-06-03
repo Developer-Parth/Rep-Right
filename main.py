@@ -8,13 +8,25 @@ import cv2
 import numpy as np
 
 from config import (
+    AppState,
     CAMERA_INDEX,
     CONSECUTIVE_FRAMES,
+    EXERCISES,
     FRAME_HEIGHT,
     FRAME_WIDTH,
     GOOD_REP_VOICE_COOLDOWN,
     INFERENCE_EVERY,
     VOICE_COOLDOWN_SEC,
+)
+from menu import (
+    MenuState,
+    _C,
+    draw_button,
+    hit_test,
+    make_button,
+    render_menu,
+    render_resign_dialog,
+    render_summary,
 )
 from pose_detector import PoseDetector
 from rep_counter import RepCounter, SquatPhase
@@ -22,20 +34,6 @@ from session_logger import SessionLogger
 from squat_analyzer import SquatAnalyzer
 from utils import MovingAverage, clamp, draw_color_for_score
 from voice_coach import VoiceCoach
-
-_C = {
-    "bg":       (5, 5, 5),
-    "black":    (0, 0, 0),
-    "cyan":     (255, 255, 50),
-    "magenta":  (255, 50, 255),
-    "green":    (50, 255, 50),
-    "orange":   (50, 180, 255),
-    "red":      (50, 50, 255),
-    "yellow":   (50, 255, 255),
-    "white":    (230, 230, 230),
-    "gray":     (100, 100, 100),
-    "panel":    (15, 10, 20),
-}
 
 _PHASE_COLOR = {
     SquatPhase.STANDING:    _C["green"],
@@ -53,6 +51,19 @@ _QUALITY_LABELS = [
 ]
 
 _EXERCISE = "SQUAT"
+
+_click_pos: list[tuple[int, int] | None] = [None]
+
+
+def _mouse_cb(event, x, y, flags, param):
+    if event == cv2.EVENT_LBUTTONDOWN:
+        _click_pos[0] = (x, y)
+
+
+def consume_click():
+    pos = _click_pos[0]
+    _click_pos[0] = None
+    return pos
 
 
 def _draw_panel(frame, x, y, pw, ph, alpha=0.55):
@@ -124,47 +135,36 @@ def _lerp_color(c1, c2, t):
     return tuple(int(a + (b - a) * t) for a, b in zip(c1, c2))
 
 
-def draw_overlay(
+def draw_workout_overlay(
     frame,
     phase, reps, score, fps, issues, issue_counters,
-    feedback_text, feedback_color, voice_on, paused, debug, debug_metrics,
+    feedback_text, feedback_color, voice_on, debug, debug_metrics,
     recent_scores,
     body_visibility=0.0,
     pulse_color=None,
 ):
     h, w = frame.shape[:2]
 
-    # ─── Top bar ───────────────────────────────────────────────
     bar_h = 44
     _draw_panel(frame, 0, 0, w, bar_h)
-
     _put_text(frame, "REP RIGHT", (14, 18), _C["cyan"], scale=0.6, thickness=2)
 
-    # Ring meter (top-right)
     ring_cx = w - 100
     ring_cy = 58
     ring_r = 52
     _draw_ring_meter(frame, ring_cx, ring_cy, ring_r, score)
-
-    # Quality badge (below ring)
     _draw_quality_badge(frame, score, ring_cx - 24, ring_cy + ring_r + 10)
 
-    # Phase badge (left, below top bar)
     phase_color = _PHASE_COLOR.get(phase, _C["white"])
     cv2.circle(frame, (16, bar_h + 18), 4, phase_color, -1, cv2.LINE_AA)
     _put_text(frame, f"{phase.value}", (28, bar_h + 22), phase_color, scale=0.5, thickness=1)
-
-    # Exercise card (next to phase)
     _put_text(frame, f"EXERCISE  {_EXERCISE}", (14, bar_h + 46), _C["gray"], scale=0.4, thickness=1)
-
-    # Latest rep count mini-label
     _put_text(frame, f"REPS  {reps}", (200, bar_h + 22), _C["white"], scale=0.45, thickness=1)
+    _put_text(frame, f"ESC  end", (w - 240, bar_h + 22), _C["gray"], scale=0.4, thickness=1)
 
-    # ─── Body visibility (floating, left of camera area) ───────
     if body_visibility > 0:
         _draw_body_visibility(frame, body_visibility, 14, bar_h + 72)
 
-    # ─── Bottom coaching panel ─────────────────────────────────
     row_h = 26
     n_rows = max(1, len(issues))
     coach_h = 48
@@ -176,12 +176,10 @@ def draw_overlay(
     _draw_corner_brackets(frame, 8, panel_y + 4, w - 16, panel_h - 8,
                           _C["cyan"], length=10, thickness=1)
 
-    # Coaching text (large, centered)
     use_color = pulse_color if pulse_color else feedback_color
     _draw_glow_text(frame, feedback_text, (w // 2 - 140, panel_y + 32),
                     use_color, scale=0.9, thickness=2, glow_layers=3)
 
-    # Issue progress bars
     bar_max_w = 160
     for i, key in enumerate(issues):
         row_y = panel_y + coach_h + 4 + i * row_h
@@ -193,7 +191,6 @@ def draw_overlay(
         cv2.rectangle(frame, (14, row_y + 4), (14 + bar_max_w, row_y + 18), _C["gray"], 1)
         _put_text(frame, key, (bar_max_w + 22, row_y + 18), bar_color, scale=0.45, thickness=1)
 
-    # ─── Sparkline (bottom-right) ──────────────────────────────
     if recent_scores:
         spark_w, spark_h2 = 200, 32
         sx = w - spark_w - 20
@@ -210,7 +207,6 @@ def draw_overlay(
                           _C["cyan"], 2, cv2.LINE_AA)
         _put_text(frame, "Recent", (sx, sy - 6), _C["gray"], scale=0.35, thickness=1)
 
-    # ─── Debug metrics (middle-right) ──────────────────────────
     if debug and debug_metrics:
         lines = [
             f"Back  {debug_metrics.get('back_angle', 0):.1f}",
@@ -221,12 +217,8 @@ def draw_overlay(
         for j, line in enumerate(lines):
             _put_text(frame, line, (w - 200, bar_h + 16 + j * 18), _C["green"], scale=0.4, thickness=1)
 
-    # ─── Voice / paused indicators ─────────────────────────────
     if not voice_on:
         _put_text(frame, "VOICE OFF", (14, h - 8), _C["gray"], scale=0.35, thickness=1)
-    if paused:
-        _draw_glow_text(frame, "PAUSED", (w // 2 - 80, h // 2),
-                        _C["yellow"], scale=1.2, thickness=3, glow_layers=4)
 
 
 def draw_banner(frame, text, color):
@@ -245,21 +237,16 @@ def draw_banner(frame, text, color):
 
 
 def main():
-    import platform
-    if platform.system() == "Darwin":
-        cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_AVFOUNDATION)
-    else:
-        cap = cv2.VideoCapture(CAMERA_INDEX)
+    window = "Rep Right"
+    cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(window, FRAME_WIDTH, FRAME_HEIGHT)
+    cv2.setMouseCallback(window, _mouse_cb)
 
-    if not cap.isOpened():
-        print(f"ERROR: Cannot open camera {CAMERA_INDEX}. "
-              "Close any app using the webcam and grant camera permission.")
-        sys.exit(1)
-
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  FRAME_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
-    cap.set(cv2.CAP_PROP_FPS, 30)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    state = AppState.MENU
+    menu_state = MenuState()
+    menu_buttons = [
+        make_button("start", (FRAME_WIDTH - 240) // 2, 375, 240, 46),
+    ]
 
     detector = PoseDetector(smoothing_window=5)
     counter  = RepCounter(smoothing_window=7)
@@ -267,236 +254,349 @@ def main():
     coach    = VoiceCoach(enabled=True)
     logger   = SessionLogger()
 
+    cap = None
     voice_on = coach.available
-    paused   = False
-    debug    = False
-
+    debug = False
+    paused = False
     issue_counters: dict[str, int] = {}
-
-    last_kp       = None
+    last_kp = None
     last_analysis = None
-    frame_count   = 0
-
+    frame_count = 0
     fps_smoother = MovingAverage(window=12)
-    prev_t       = time.monotonic()
-
-    # Fault pulse state
+    prev_t = time.monotonic()
     prev_active_issues: set = set()
     pulse_active = False
     pulse_start = 0.0
     pulse_color_val = None
+    last_frame = None
 
-    def _on_rep_done(record):
+    resign_buttons = [
+        make_button("resume", FRAME_WIDTH // 2 - 180, 410, 160, 40),
+        make_button("end", FRAME_WIDTH // 2 + 20, 410, 160, 40),
+    ]
+
+    summary_buttons = [
+        make_button("continue", (FRAME_WIDTH - 240) // 2, 520, 240, 46),
+    ]
+    summary_data = {}
+
+    blank_frame = np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8)
+
+    def _rep_complete(record):
         score, issues, depth_ok = analyzer.finalize_rep()
-        counter.record_rep_score(score, issues, depth_ok)
         logger.record_rep(record.rep_number, score, issues, depth_ok)
         for iss in issues:
             logger.record_correction(iss)
-        if voice_on:
-            key = "Good rep" if score >= 85 else "Rep complete"
-            coach.alert(key, cooldown=GOOD_REP_VOICE_COOLDOWN)
 
-    counter.on_rep_complete(_on_rep_done)
+    counter.on_rep_complete(_rep_complete)
+
+    def _open_cam():
+        nonlocal cap
+        import platform
+        if platform.system() == "Darwin":
+            cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_AVFOUNDATION)
+        else:
+            cap = cv2.VideoCapture(CAMERA_INDEX)
+        if not cap or not cap.isOpened():
+            return False
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+        cap.set(cv2.CAP_PROP_FPS, 30)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        return True
+
+    def _close_cam():
+        nonlocal cap
+        if cap:
+            cap.release()
+            cap = None
+
+    def _reset_workout_state():
+        nonlocal frame_count, paused, issue_counters
+        nonlocal last_kp, last_analysis, prev_active_issues
+        nonlocal pulse_active, prev_t, last_frame
+        counter.reset()
+        analyzer.reset()
+        issue_counters.clear()
+        last_kp = last_analysis = None
+        prev_active_issues.clear()
+        pulse_active = False
+        frame_count = 0
+        paused = False
+        fps_smoother.reset()
+        prev_t = time.monotonic()
+        last_frame = None
 
     print("=" * 60)
     print("  REP RIGHT")
     print("=" * 60)
-    print("  Controls (focus preview window):")
+    print("  Controls:")
     print("    q / ESC -> quit            p -> pause / resume")
     print("    r       -> reset session   v -> toggle voice")
     print("    d       -> toggle debug overlay")
     print()
-    print("  TIP: Stand side-on to the camera ~1.5-2 m away,")
-    print("       full body in frame. The coach calibrates for ~1 s")
-    print("       while you stand still, then start squatting.")
+    print("  TIP: Stand side-on ~1.5-2 m away,")
+    print("       full body in frame. Calibrates for ~1 s.")
     print("=" * 60)
-
-    window = "Rep Right"
-    cv2.namedWindow(window, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(window, FRAME_WIDTH, FRAME_HEIGHT)
 
     try:
         while True:
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                if cv2.waitKey(10) & 0xFF in (ord('q'), 27):
-                    break
-                continue
-
-            frame = cv2.flip(frame, 1)
-            h, w  = frame.shape[:2]
-
             now = time.monotonic()
-            dt  = max(now - prev_t, 1e-4)
-            fps = fps_smoother.update(1.0 / dt)
-            prev_t = now
 
-            if paused:
-                draw_banner(frame, "PAUSED - press P to resume", _C["yellow"])
-                cv2.imshow(window, frame)
+            if state == AppState.MENU:
+                click = consume_click()
+                if click:
+                    clicked = hit_test(menu_buttons, click[0], click[1])
+                    if clicked and clicked.action == "start":
+                        _reset_workout_state()
+                        logger = SessionLogger()
+                        if not _open_cam():
+                            print("ERROR: Cannot open camera.")
+                            _close_cam()
+                        else:
+                            state = AppState.WORKOUT
+                            print(f"Starting: {EXERCISES[menu_state.selected_exercise]}")
+
+                render_menu(blank_frame, menu_state.selected_exercise, menu_buttons)
+                cv2.imshow(window, blank_frame)
+
                 k = cv2.waitKey(30) & 0xFF
-                if k in (ord('q'), 27):
+                if k == ord('q') or k == 27:
                     break
-                if k == ord('p'):
-                    paused = False
-                    print("Resumed.")
-                continue
+                if k == 13 or k == 10:
+                    _reset_workout_state()
+                    logger = SessionLogger()
+                    if not _open_cam():
+                        print("ERROR: Cannot open camera.")
+                        _close_cam()
+                    else:
+                        state = AppState.WORKOUT
+                        print(f"Starting: {EXERCISES[menu_state.selected_exercise]}")
 
-            frame_count += 1
-            run_inference = (frame_count % INFERENCE_EVERY == 0)
+            elif state == AppState.WORKOUT:
+                if cap is None or not cap.isOpened():
+                    state = AppState.MENU
+                    _close_cam()
+                    continue
 
-            if run_inference:
-                kp = detector.process(frame)
-                last_kp = kp
-            else:
-                detector.draw_cached(frame)
-                kp = last_kp
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    if cv2.waitKey(10) & 0xFF in (ord('q'), 27):
+                        break
+                    continue
 
-            phase = SquatPhase.CALIBRATING
-            score = 100.0
-            current_issues: list[str] = []
-            feedback_text  = "Get into view - stand side-on, full body"
-            feedback_color = _C["white"]
-            debug_metrics: dict = {}
-            body_visibility = 0.0
+                frame = cv2.flip(frame, 1)
 
-            if kp is not None and kp.valid:
-                l_hip = kp.get("left_hip")
-                r_hip = kp.get("right_hip")
-                hip_y = float(np.mean([l_hip[1], r_hip[1]])) \
-                    if (l_hip is not None and r_hip is not None) else 0.0
+                dt = max(now - prev_t, 1e-4)
+                fps = fps_smoother.update(1.0 / dt)
+                prev_t = now
 
-                phase = counter.update(hip_y, h)
+                if paused:
+                    draw_banner(frame, "PAUSED - press P to resume", _C["yellow"])
+                    cv2.imshow(window, frame)
+                    k = cv2.waitKey(30) & 0xFF
+                    if k == ord('q') or k == 27:
+                        state = AppState.RESIGN_DIALOG
+                    if k == ord('p'):
+                        paused = False
+                    continue
+
+                frame_count += 1
+                run_inference = (frame_count % INFERENCE_EVERY == 0)
 
                 if run_inference:
-                    analysis = analyzer.analyse(kp, phase)
-                    last_analysis = analysis
+                    kp = detector.process(frame)
+                    last_kp = kp
                 else:
-                    analysis = last_analysis
+                    detector.draw_cached(frame)
+                    kp = last_kp
 
-                if analysis is not None and analysis.analysed:
-                    score          = analysis.score
-                    current_issues = list(analysis.issues)
+                phase = SquatPhase.CALIBRATING
+                score = 100.0
+                current_issues: list[str] = []
+                feedback_text = "Get into view - stand side-on, full body"
+                feedback_color = _C["white"]
+                debug_metrics: dict = {}
+                body_visibility = 0.0
 
-                    debug_metrics = {
-                        "back_angle": analysis.back_angle,
-                        "knee_l":     analysis.knee_angle_left,
-                        "knee_r":     analysis.knee_angle_right,
-                        "hip_y":      hip_y,
-                    }
+                if kp is not None and kp.valid:
+                    l_hip = kp.get("left_hip")
+                    r_hip = kp.get("right_hip")
+                    hip_y = float(np.mean([l_hip[1], r_hip[1]])) \
+                        if (l_hip is not None and r_hip is not None) else 0.0
 
-                # Body visibility
-                vis_values = [v for v in kp.visibility.values() if v > 0]
-                body_visibility = float(np.mean(vis_values)) * 100 if vis_values else 0.0
+                    phase = counter.update(hip_y, FRAME_HEIGHT)
 
-                active_set = set(current_issues)
-                for key in list(issue_counters):
-                    if key not in active_set:
-                        issue_counters[key] = 0
-                for key in current_issues:
-                    issue_counters[key] = issue_counters.get(key, 0) + 1
-
-                # Fault pulse
-                if active_set and active_set != prev_active_issues:
-                    pulse_active = True
-                    pulse_start = now
-                prev_active_issues = active_set
-
-                if voice_on and current_issues:
-                    sustained = [
-                        k for k in current_issues
-                        if issue_counters.get(k, 0) >= CONSECUTIVE_FRAMES
-                    ]
-                    if sustained:
-                        priority = ["Go deeper", "Push knees out",
-                                    "Knees too far forward", "Keep chest up"]
-                        sustained.sort(key=lambda k: priority.index(k)
-                                       if k in priority else 99)
-                        coach.alert(sustained[0], cooldown=VOICE_COOLDOWN_SEC)
-
-                if current_issues:
-                    feedback_text  = current_issues[0]
-                    feedback_color = _C["red"]
-                elif phase == SquatPhase.CALIBRATING:
-                    feedback_text  = "Calibrating - stand still"
-                    feedback_color = _C["yellow"]
-                elif phase == SquatPhase.STANDING:
-                    feedback_text  = "Ready - squat when you like"
-                    feedback_color = _C["green"]
-                else:
-                    feedback_text  = f"{phase.value} - form looks good"
-                    feedback_color = _C["green"]
-
-            else:
-                draw_banner(frame, "Step into frame", _C["white"])
-
-            # Pulse animation
-            if pulse_active:
-                elapsed = (now - pulse_start) * 1000
-                if elapsed < 400:
-                    t = elapsed / 400
-                    if t < 0.5:
-                        pulse_color_val = _lerp_color(_C["cyan"], _C["magenta"], t * 2)
+                    if run_inference:
+                        analysis = analyzer.analyse(kp, phase)
+                        last_analysis = analysis
                     else:
-                        pulse_color_val = _lerp_color(_C["magenta"], _C["red"], (t - 0.5) * 2)
+                        analysis = last_analysis
+
+                    if analysis is not None and analysis.analysed:
+                        score = analysis.score
+                        current_issues = list(analysis.issues)
+                        debug_metrics = {
+                            "back_angle": analysis.back_angle,
+                            "knee_l": analysis.knee_angle_left,
+                            "knee_r": analysis.knee_angle_right,
+                            "hip_y": hip_y,
+                        }
+                        counter.record_rep_score(score, current_issues, analysis.depth_ok)
+
+                    vis_values = [v for v in kp.visibility.values() if v > 0]
+                    body_visibility = float(np.mean(vis_values)) * 100 if vis_values else 0.0
+
+                    active_set = set(current_issues)
+                    for key in list(issue_counters):
+                        if key not in active_set:
+                            issue_counters[key] = 0
+                    for key in current_issues:
+                        issue_counters[key] = issue_counters.get(key, 0) + 1
+
+                    if active_set and active_set != prev_active_issues:
+                        pulse_active = True
+                        pulse_start = now
+                    prev_active_issues = active_set
+
+                    if voice_on and current_issues:
+                        sustained = [
+                            k for k in current_issues
+                            if issue_counters.get(k, 0) >= CONSECUTIVE_FRAMES
+                        ]
+                        if sustained:
+                            priority = ["Go deeper", "Push knees out",
+                                        "Knees too far forward", "Keep chest up"]
+                            sustained.sort(key=lambda k: priority.index(k)
+                                           if k in priority else 99)
+                            coach.alert(sustained[0], cooldown=VOICE_COOLDOWN_SEC)
+
+                    if current_issues:
+                        feedback_text = current_issues[0]
+                        feedback_color = _C["red"]
+                    elif phase == SquatPhase.CALIBRATING:
+                        feedback_text = "Calibrating - stand still"
+                        feedback_color = _C["yellow"]
+                    elif phase == SquatPhase.STANDING:
+                        feedback_text = "Ready - squat when you like"
+                        feedback_color = _C["green"]
+                    else:
+                        feedback_text = f"{phase.value} - form looks good"
+                        feedback_color = _C["green"]
+
                 else:
-                    pulse_active = False
+                    draw_banner(frame, "Step into frame", _C["white"])
+
+                if pulse_active:
+                    elapsed = (now - pulse_start) * 1000
+                    if elapsed < 400:
+                        t = elapsed / 400
+                        if t < 0.5:
+                            pulse_color_val = _lerp_color(_C["cyan"], _C["magenta"], t * 2)
+                        else:
+                            pulse_color_val = _lerp_color(_C["magenta"], _C["red"], (t - 0.5) * 2)
+                    else:
+                        pulse_active = False
+                        pulse_color_val = None
+                else:
                     pulse_color_val = None
-            else:
-                pulse_color_val = None
 
-            recent_scores = [r.score for r in counter.rep_history if r.score > 0]
-            draw_overlay(
-                frame=frame,
-                phase=phase,
-                reps=counter.rep_count,
-                score=score,
-                fps=fps,
-                issues=current_issues,
-                issue_counters=issue_counters,
-                feedback_text=feedback_text,
-                feedback_color=feedback_color,
-                voice_on=voice_on,
-                paused=paused,
-                debug=debug,
-                debug_metrics=debug_metrics,
-                recent_scores=recent_scores,
-                body_visibility=body_visibility,
-                pulse_color=pulse_color_val,
-            )
+                recent_scores = [r.score for r in counter.rep_history if r.score > 0]
+                draw_workout_overlay(
+                    frame=frame,
+                    phase=phase,
+                    reps=counter.rep_count,
+                    score=score,
+                    fps=fps,
+                    issues=current_issues,
+                    issue_counters=issue_counters,
+                    feedback_text=feedback_text,
+                    feedback_color=feedback_color,
+                    voice_on=voice_on,
+                    debug=debug,
+                    debug_metrics=debug_metrics,
+                    recent_scores=recent_scores,
+                    body_visibility=body_visibility,
+                    pulse_color=pulse_color_val,
+                )
 
-            cv2.imshow(window, frame)
+                cv2.imshow(window, frame)
+                last_frame = frame.copy()
 
-            k = cv2.waitKey(1) & 0xFF
-            if k in (ord('q'), 27):
-                break
-            elif k == ord('p'):
-                paused = True
-                print("Paused.")
-            elif k == ord('r'):
-                counter.reset()
-                analyzer.reset()
-                issue_counters.clear()
-                last_kp = last_analysis = None
-                prev_active_issues.clear()
-                pulse_active = False
-                print("Session reset.")
-            elif k == ord('v'):
-                voice_on = not voice_on and coach.available
-                coach.set_enabled(voice_on)
-                print(f"Voice: {'ON' if voice_on else 'OFF'}")
-            elif k == ord('d'):
-                debug = not debug
-                print(f"Debug overlay: {'ON' if debug else 'OFF'}")
+                k = cv2.waitKey(1) & 0xFF
+                if k == 27:
+                    state = AppState.RESIGN_DIALOG
+                elif k == ord('q'):
+                    break
+                elif k == ord('p'):
+                    paused = True
+                elif k == ord('r'):
+                    _reset_workout_state()
+                elif k == ord('v'):
+                    voice_on = not voice_on and coach.available
+                    coach.set_enabled(voice_on)
+                elif k == ord('d'):
+                    debug = not debug
+
+            elif state == AppState.RESIGN_DIALOG:
+                bg = last_frame if last_frame is not None else blank_frame.copy()
+                render_resign_dialog(bg, resign_buttons)
+                cv2.imshow(window, bg)
+
+                click = consume_click()
+                if click:
+                    clicked = hit_test(resign_buttons, click[0], click[1])
+                    if clicked:
+                        if clicked.action == "resume":
+                            state = AppState.WORKOUT
+                        elif clicked.action == "end":
+                            _close_cam()
+                            coach.stop()
+                            logger.save()
+                            summary_data = {
+                                "exercise": EXERCISES[menu_state.selected_exercise],
+                                "total_reps": logger.total_reps,
+                                "avg_score": logger.avg_score,
+                                "duration_str": f"{logger.duration / 60:.0f}:{logger.duration % 60:02.0f}",
+                                "top_issue": logger.most_frequent_issue or "None",
+                            }
+                            state = AppState.SUMMARY
+
+                k = cv2.waitKey(30) & 0xFF
+                if k == 27:
+                    state = AppState.WORKOUT
+                elif k == ord('q'):
+                    break
+
+            elif state == AppState.SUMMARY:
+                render_summary(blank_frame, summary_data, summary_buttons)
+                cv2.imshow(window, blank_frame)
+
+                click = consume_click()
+                if click:
+                    clicked = hit_test(summary_buttons, click[0], click[1])
+                    if clicked and clicked.action == "continue":
+                        state = AppState.MENU
+                        coach = VoiceCoach(enabled=True)
+                        voice_on = coach.available
+
+                k = cv2.waitKey(30) & 0xFF
+                if k == ord('q') or k == 27:
+                    break
+                if k == 13 or k == 10:
+                    state = AppState.MENU
+                    coach = VoiceCoach(enabled=True)
+                    voice_on = coach.available
 
     except KeyboardInterrupt:
-        print("\nInterrupted by user.")
+        print("\nInterrupted.")
     finally:
-        cap.release()
+        _close_cam()
         cv2.destroyAllWindows()
         detector.release()
         coach.stop()
-        logger.save()
+        if logger.total_reps > 0:
+            logger.save()
 
 
 if __name__ == "__main__":
