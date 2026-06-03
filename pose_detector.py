@@ -8,8 +8,9 @@ from utils import PointSmoother
 from mediapipe.tasks.python import BaseOptions
 from mediapipe.tasks.python.vision import (
     PoseLandmarker, PoseLandmarkerOptions,
-    drawing_utils, drawing_styles,
+    drawing_utils,
 )
+from mediapipe.tasks.python.vision.drawing_utils import DrawingSpec
 from mediapipe.tasks.python.vision.pose_landmarker import (
     PoseLandmark, PoseLandmarksConnections,
 )
@@ -98,7 +99,8 @@ class PoseDetector:
             frame,
             landmark_list,
             connections=POSE_CONNECTIONS,
-            landmark_drawing_spec=drawing_styles.get_default_pose_landmarks_style(),
+            landmark_drawing_spec=DrawingSpec(color=(255, 50, 255), thickness=2, circle_radius=3),
+            connection_drawing_spec=DrawingSpec(color=(255, 255, 50), thickness=2),
         )
 
         for name, idx in KEY_LANDMARKS.items():
@@ -126,7 +128,8 @@ class PoseDetector:
             frame,
             self._last_landmark_list,
             connections=self._last_connections,
-            landmark_drawing_spec=drawing_styles.get_default_pose_landmarks_style(),
+            landmark_drawing_spec=DrawingSpec(color=(255, 50, 255), thickness=2, circle_radius=3),
+            connection_drawing_spec=DrawingSpec(color=(255, 255, 50), thickness=2),
         )
 
     def reset_smoothers(self) -> None:
