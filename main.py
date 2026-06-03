@@ -25,6 +25,7 @@ from voice_coach import VoiceCoach
 
 _C = {
     "bg":       (5, 5, 5),
+    "black":    (0, 0, 0),
     "cyan":     (255, 255, 50),
     "magenta":  (255, 50, 255),
     "green":    (50, 255, 50),
