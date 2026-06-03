@@ -149,7 +149,7 @@ Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
 
 ## License
 
-This project is open source under the MIT License.
+This project is open source under the [MIT License](LICENSE).
 
 ---
 
